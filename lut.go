@@ -49,7 +49,10 @@ func dequantizeBlock4_LUT(data []byte, vec []float32, scale, zero float32, start
 
 // quantizeBlock8_LUT quantizes an 8-bit block with SIMD-style loop unrolling.
 func quantizeBlock8_LUT(vec []float32, out []byte, scale, zero float32, start, end int) int {
-	invScale := 1.0 / scale
+	invScale := float32(0)
+	if scale != 0 {
+		invScale = 1.0 / scale
+	}
 
 	i := start
 	j := 0
@@ -86,7 +89,10 @@ func fastRoundUint8(v float32) byte {
 
 // quantizeBlock4_LUT quantizes a 4-bit block with SIMD-style loop unrolling.
 func quantizeBlock4_LUT(vec []float32, out []byte, scale, zero float32, start, end int) int {
-	invScale := 1.0 / scale
+	invScale := float32(0)
+	if scale != 0 {
+		invScale = 1.0 / scale
+	}
 
 	i := start
 	j := 0

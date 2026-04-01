@@ -36,12 +36,6 @@ loop8:
     VMOVDQU (BX)(R9*1), Y5
     VMOVDQU 32(BX)(R9*1), Y6
 
-    // Zero-extend to 16-bit
-    VPUNPCKLBW Y7, Y7, Y3  // wait, Y7 is not zeroed properly
-    // Let me use a cleaner approach
-
-    // Actually, for 8-bit dot product, we need to multiply bytes.
-    // AVX2 doesn't have byte multiply, so we expand to 16-bit first.
     // VPMADDUBSW does signed*unsigned byte multiply → 16-bit results
 
     // sumQQ: a_i * b_i

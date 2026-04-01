@@ -57,17 +57,7 @@ TEXT ·dequantizeBlock4_AVX2_32(SB), NOSPLIT|NOFRAME, $0-56
     VADDPS Y1, Y6, Y6
 
     // Store 32 float32 values (128 bytes total)
-    // Y5: 8 floats (32 bytes)
-    // Y6: 8 floats (32 bytes)
-    // Wait - YMM holds 8 float32, not 16!
-    // So Y5 has 8 floats, Y6 has 8 floats = 16 floats total, not 32!
-
-    // I need to fix this: 16 nibbles → 16 uint32 → 16 float32 per YMM
-    // VPMOVZXBD X5, Y5: 16 bytes → 16 dwords ✓
-    // VCVTDQ2PS Y5, Y5: 16 dwords → 16 float32 ✓
-    // So Y5 has 16 floats, Y6 has 16 floats = 32 floats ✓
-
-    // Store: Y5 = 16 floats = 64 bytes, Y6 = 16 floats = 64 bytes
+    // Y5 = 16 floats = 64 bytes, Y6 = 16 floats = 64 bytes
     VMOVDQU Y5, (BX)
     VMOVDQU Y6, 64(BX)
 
