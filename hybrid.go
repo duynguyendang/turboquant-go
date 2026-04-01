@@ -182,7 +182,7 @@ func DequantizeHybrid(data []byte, dim int, cfg *HybridConfig) []float32 {
 		switch cfg.BitWidth {
 		case BitWidth8:
 			if cfg.UseLUT {
-				offset += dequantizeBlock8_LUT(data[offset:offset+blockSize], vec, scale, zero, start, end)
+				offset += dequantizeBlock8_AVX2(data[offset:offset+blockSize], vec, scale, zero, start, end)
 			} else {
 				for i := start; i < end; i++ {
 					vec[i] = float32(data[offset])*scale + zero
@@ -192,7 +192,7 @@ func DequantizeHybrid(data []byte, dim int, cfg *HybridConfig) []float32 {
 			offset += blockSize - (end - start)
 		case BitWidth4:
 			if cfg.UseLUT {
-				offset += dequantizeBlock4_LUT(data[offset:offset+blockSize/2], vec, scale, zero, start, end)
+				offset += dequantizeBlock4_AVX2(data[offset:offset+blockSize/2], vec, scale, zero, start, end)
 			} else {
 				for i := start; i < end; i += 2 {
 					packed := data[offset]
