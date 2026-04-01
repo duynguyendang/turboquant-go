@@ -96,19 +96,21 @@ func (r *Registry) SearchWithLimit(query []float32, k int) ([]SearchResult, erro
 // scanChunkHybrid scans a chunk of vectors and returns the top-k results.
 func scanChunkHybrid(vectors []byte, query []byte, startIdx, endIdx, k int, vectorSize int, revMap []uint64, dim int, cfg *HybridConfig) []SearchResult {
 	h := make(scoreHeap, 0, k)
+	numVectors := endIdx - startIdx
+	scores := make([]float32, numVectors)
 
-	for idx := startIdx; idx < endIdx; idx++ {
-		vecStart := idx * vectorSize
-		vecData := vectors[vecStart : vecStart+vectorSize]
-		score := DotProductHybrid(vecData, query, dim, cfg)
+	dotProductHybridBatch(query, vectors[startIdx*vectorSize:endIdx*vectorSize], numVectors, vectorSize, dim, cfg, scores)
+
+	for idx := 0; idx < numVectors; idx++ {
+		score := scores[idx]
 
 		if len(h) < k {
-			h = append(h, scoreIndex{score: score, idx: idx})
+			h = append(h, scoreIndex{score: score, idx: startIdx + idx})
 			if len(h) == k {
 				heap.Init(&h)
 			}
 		} else if score > h[0].score {
-			h[0] = scoreIndex{score: score, idx: idx}
+			h[0] = scoreIndex{score: score, idx: startIdx + idx}
 			heap.Fix(&h, 0)
 		}
 	}
@@ -127,18 +129,36 @@ func scanChunkHybrid(vectors []byte, query []byte, startIdx, endIdx, k int, vect
 }
 
 func getTopK(results []SearchResult, k int) []SearchResult {
-	if len(results) == 0 {
+	if len(results) <= k {
+		if len(results) > 1 {
+			sort.Slice(results, func(i, j int) bool {
+				return results[i].Score > results[j].Score
+			})
+		}
 		return results
 	}
 
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Score > results[j].Score
-	})
+	h := make(scoreHeap, k)
+	heap.Init(&h)
 
-	if len(results) > k {
-		return results[:k]
+	for i, r := range results {
+		if i < k {
+			h[i] = scoreIndex{score: r.Score, idx: i}
+		} else if r.Score > h[0].score {
+			h[0] = scoreIndex{score: r.Score, idx: i}
+			heap.Fix(&h, 0)
+		}
 	}
-	return results
+
+	sorted := make([]SearchResult, 0, k)
+	for _, si := range h {
+		sorted = append(sorted, results[si.idx])
+	}
+
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Score > sorted[j].Score
+	})
+	return sorted
 }
 
 // SearchIter returns an iter.Seq that yields SearchResult pairs ordered by score descending.
@@ -166,11 +186,12 @@ func (r *Registry) SearchIter(query []float32, k int) iter.Seq[SearchResult] {
 
 	return func(yield func(SearchResult) bool) {
 		h := make(scoreHeap, 0, k)
+		scores := make([]float32, numVectors)
+
+		dotProductHybridBatch(hybridQuery, vectors, numVectors, vectorSize, dim, cfg, scores)
 
 		for idx := 0; idx < numVectors; idx++ {
-			vecStart := idx * vectorSize
-			vecData := vectors[vecStart : vecStart+vectorSize]
-			score := DotProductHybrid(vecData, hybridQuery, dim, cfg)
+			score := scores[idx]
 
 			if len(h) < k {
 				h = append(h, scoreIndex{score: score, idx: idx})
