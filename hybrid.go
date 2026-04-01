@@ -54,7 +54,7 @@ func QuantizeHybrid(vec []float32, cfg *HybridConfig) []byte {
 	padded := make([]float32, paddedDim)
 	copy(padded, vec)
 
-	FWHT(padded)
+	FWHT_Optimized(padded)
 
 	invNorm := 1.0 / float32(math.Sqrt(float64(paddedDim)))
 	for i := range padded {
@@ -207,7 +207,7 @@ func DequantizeHybrid(data []byte, dim int, cfg *HybridConfig) []float32 {
 		}
 	}
 
-	FWHT(vec)
+	FWHT_Optimized(vec)
 	invNorm := 1.0 / float32(math.Sqrt(float64(paddedDim)))
 	for i := range vec {
 		vec[i] *= invNorm

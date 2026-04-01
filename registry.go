@@ -1,6 +1,7 @@
 package turboquant
 
 import (
+	"iter"
 	"sync"
 )
 
@@ -10,9 +11,9 @@ type Registry struct {
 	hybridCfg  *HybridConfig
 	vectorSize int
 
-	vectors    []byte // contiguous memory for all compressed vectors
-	idMap      map[uint64]int
-	revMap     []uint64
+	vectors      []byte // contiguous memory for all compressed vectors
+	idMap        map[uint64]int
+	revMap       []uint64
 	totalVectors int
 
 	mu sync.RWMutex
@@ -23,6 +24,12 @@ func NewRegistry(cfg *Config) (*Registry, error) {
 	if cfg == nil {
 		cfg = DefaultConfig()
 	}
+	if cfg.NumWorkers <= 0 {
+		cfg.NumWorkers = 1
+	}
+	if cfg.VectorCapacity <= 0 {
+		cfg.VectorCapacity = 10000
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -31,11 +38,11 @@ func NewRegistry(cfg *Config) (*Registry, error) {
 	vectorSize := HybridVectorSize(cfg.PaddedDim(), hybridCfg)
 
 	r := &Registry{
-		config:      cfg,
-		hybridCfg:   hybridCfg,
-		vectorSize:  vectorSize,
-		idMap:       make(map[uint64]int, cfg.VectorCapacity),
-		revMap:      make([]uint64, 0, cfg.VectorCapacity),
+		config:     cfg,
+		hybridCfg:  hybridCfg,
+		vectorSize: vectorSize,
+		idMap:      make(map[uint64]int, cfg.VectorCapacity),
+		revMap:     make([]uint64, 0, cfg.VectorCapacity),
 	}
 
 	// Pre-allocate vector storage
@@ -187,5 +194,68 @@ func (r *Registry) Reserve(n int) {
 		newVec := make([]byte, len(r.vectors), required)
 		copy(newVec, r.vectors)
 		r.vectors = newVec
+	}
+}
+
+// All returns an iter.Seq2 that yields (id, compressedVector) pairs.
+func (r *Registry) All() iter.Seq2[uint64, []byte] {
+	r.mu.RLock()
+	numVectors := r.totalVectors
+	vectorSize := r.vectorSize
+	revMap := make([]uint64, len(r.revMap))
+	copy(revMap, r.revMap)
+	vectors := make([]byte, len(r.vectors))
+	copy(vectors, r.vectors)
+	r.mu.RUnlock()
+
+	return func(yield func(uint64, []byte) bool) {
+		for i := 0; i < numVectors; i++ {
+			start := i * vectorSize
+			vec := vectors[start : start+vectorSize]
+			if !yield(revMap[i], vec) {
+				return
+			}
+		}
+	}
+}
+
+// AllDecompressed returns an iter.Seq2 that yields (id, decompressedVector) pairs.
+func (r *Registry) AllDecompressed() iter.Seq2[uint64, []float32] {
+	r.mu.RLock()
+	numVectors := r.totalVectors
+	vectorSize := r.vectorSize
+	revMap := make([]uint64, len(r.revMap))
+	copy(revMap, r.revMap)
+	vectors := make([]byte, len(r.vectors))
+	copy(vectors, r.vectors)
+	dim := r.config.FullDim
+	cfg := r.hybridCfg
+	r.mu.RUnlock()
+
+	return func(yield func(uint64, []float32) bool) {
+		for i := 0; i < numVectors; i++ {
+			start := i * vectorSize
+			vecData := vectors[start : start+vectorSize]
+			vec := DequantizeHybrid(vecData, dim, cfg)
+			if !yield(revMap[i], vec) {
+				return
+			}
+		}
+	}
+}
+
+// IDsIter returns an iter.Seq that yields vector IDs.
+func (r *Registry) IDsIter() iter.Seq[uint64] {
+	r.mu.RLock()
+	revMap := make([]uint64, len(r.revMap))
+	copy(revMap, r.revMap)
+	r.mu.RUnlock()
+
+	return func(yield func(uint64) bool) {
+		for _, id := range revMap {
+			if !yield(id) {
+				return
+			}
+		}
 	}
 }

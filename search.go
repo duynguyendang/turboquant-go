@@ -2,6 +2,7 @@ package turboquant
 
 import (
 	"container/heap"
+	"iter"
 	"sort"
 )
 
@@ -19,8 +20,8 @@ type scoreIndex struct {
 type scoreHeap []scoreIndex
 
 func (h scoreHeap) Len() int           { return len(h) }
-func (h scoreHeap) Less(i, j int) bool  { return h[i].score < h[j].score }
-func (h scoreHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
+func (h scoreHeap) Less(i, j int) bool { return h[i].score < h[j].score }
+func (h scoreHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
 func (h *scoreHeap) Push(x any)        { *h = append(*h, x.(scoreIndex)) }
 func (h *scoreHeap) Pop() any {
 	old := *h
@@ -54,8 +55,6 @@ func (r *Registry) SearchWithLimit(query []float32, k int) ([]SearchResult, erro
 	vectors := r.vectors
 	dim := r.config.FullDim
 	cfg := r.hybridCfg
-	r.mu.RUnlock()
-
 	numWorkers := r.config.NumWorkers
 	if numWorkers > numVectors {
 		numWorkers = numVectors
@@ -89,8 +88,8 @@ func (r *Registry) SearchWithLimit(query []float32, k int) ([]SearchResult, erro
 		res := <-resultCh
 		allResults = append(allResults, res.results...)
 	}
-	close(resultCh)
 
+	r.mu.RUnlock()
 	return getTopK(allResults, k), nil
 }
 
@@ -140,4 +139,65 @@ func getTopK(results []SearchResult, k int) []SearchResult {
 		return results[:k]
 	}
 	return results
+}
+
+// SearchIter returns an iter.Seq that yields SearchResult pairs ordered by score descending.
+func (r *Registry) SearchIter(query []float32, k int) iter.Seq[SearchResult] {
+	if k <= 0 {
+		return func(yield func(SearchResult) bool) {}
+	}
+
+	r.mu.RLock()
+	numVectors := r.totalVectors
+	if numVectors == 0 {
+		r.mu.RUnlock()
+		return func(yield func(SearchResult) bool) {}
+	}
+
+	hybridQuery := QuantizeHybrid(query, r.hybridCfg)
+	vectorSize := r.vectorSize
+	revMap := make([]uint64, len(r.revMap))
+	copy(revMap, r.revMap)
+	vectors := make([]byte, len(r.vectors))
+	copy(vectors, r.vectors)
+	dim := r.config.FullDim
+	cfg := r.hybridCfg
+	r.mu.RUnlock()
+
+	return func(yield func(SearchResult) bool) {
+		h := make(scoreHeap, 0, k)
+
+		for idx := 0; idx < numVectors; idx++ {
+			vecStart := idx * vectorSize
+			vecData := vectors[vecStart : vecStart+vectorSize]
+			score := DotProductHybrid(vecData, hybridQuery, dim, cfg)
+
+			if len(h) < k {
+				h = append(h, scoreIndex{score: score, idx: idx})
+				if len(h) == k {
+					heap.Init(&h)
+				}
+			} else if score > h[0].score {
+				h[0] = scoreIndex{score: score, idx: idx}
+				heap.Fix(&h, 0)
+			}
+		}
+
+		sorted := make([]scoreIndex, len(h))
+		copy(sorted, h)
+		sort.Slice(sorted, func(i, j int) bool {
+			return sorted[i].score > sorted[j].score
+		})
+
+		for _, si := range sorted {
+			if si.idx < len(revMap) {
+				if !yield(SearchResult{
+					ID:    revMap[si.idx],
+					Score: si.score,
+				}) {
+					return
+				}
+			}
+		}
+	}
 }

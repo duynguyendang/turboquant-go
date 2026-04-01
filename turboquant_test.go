@@ -10,27 +10,21 @@ import (
 
 // Benchmark configuration
 const (
-	benchDim        = 1536
+	benchDim         = 1536
 	benchVectorCount = 100000
 	benchTopK        = 10
 )
 
 var (
 	benchRegistry *Registry
-	benchVectors  [][]float32
-	benchQuery    []float32
 )
-
-func init() {
-	rand.Seed(time.Now().UnixNano())
-}
 
 // generateRandomVector creates a random normalized vector of given dimension.
 func generateRandomVector(dim int) []float32 {
 	vec := make([]float32, dim)
 	var sumSquares float32
 	for i := 0; i < dim; i++ {
-		v := float32(rand.NormFloat64() * 0.1)
+		v := float32(rand.Float64()*2 - 1)
 		vec[i] = v
 		sumSquares += v * v
 	}
@@ -77,7 +71,6 @@ func setupBenchRegistry(t *testing.B) *Registry {
 func setupBench(t *testing.B) {
 	if benchRegistry == nil || benchRegistry.Count() == 0 {
 		benchRegistry = setupBenchRegistry(t)
-		benchQuery = generateRandomVector(benchDim)
 	}
 }
 
@@ -198,12 +191,13 @@ func BenchmarkDotProductHybridFull(b *testing.B) {
 
 func BenchmarkSearch(b *testing.B) {
 	setupBench(b)
+	query := generateRandomVector(benchDim)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		benchRegistry.Search(benchQuery, benchTopK)
+		benchRegistry.Search(query, benchTopK)
 	}
 }
 
@@ -620,5 +614,133 @@ func PrintSearchScale() {
 
 		fmt.Printf("n=%d: Add=%.2fms, Search=%.2fms, Results=%d\n",
 			n, float64(addDuration.Milliseconds()), float64(searchDuration.Milliseconds()), len(results))
+	}
+}
+
+// --- Iter Tests ---
+
+func TestRegistryAll(t *testing.T) {
+	reg, _ := NewRegistry(nil)
+	for i := 0; i < 5; i++ {
+		reg.Add(uint64(i), generateRandomVector(1536))
+	}
+
+	count := 0
+	ids := make(map[uint64]bool)
+	for id, vec := range reg.All() {
+		count++
+		ids[id] = true
+		if len(vec) != reg.VectorSize() {
+			t.Errorf("unexpected vector size: got %d, want %d", len(vec), reg.VectorSize())
+		}
+	}
+	if count != 5 {
+		t.Errorf("expected 5 vectors, got %d", count)
+	}
+	for i := 0; i < 5; i++ {
+		if !ids[uint64(i)] {
+			t.Errorf("missing id %d", i)
+		}
+	}
+}
+
+func TestRegistryAllDecompressed(t *testing.T) {
+	reg, _ := NewRegistry(nil)
+	for i := 0; i < 3; i++ {
+		reg.Add(uint64(i), generateRandomVector(1536))
+	}
+
+	count := 0
+	for id, vec := range reg.AllDecompressed() {
+		count++
+		if len(vec) != 1536 {
+			t.Errorf("unexpected decompressed size: got %d, want 1536", len(vec))
+		}
+		if id >= 3 {
+			t.Errorf("unexpected id: %d", id)
+		}
+	}
+	if count != 3 {
+		t.Errorf("expected 3 vectors, got %d", count)
+	}
+}
+
+func TestRegistryIDsIter(t *testing.T) {
+	reg, _ := NewRegistry(nil)
+	for i := 0; i < 5; i++ {
+		reg.Add(uint64(i*10), generateRandomVector(1536))
+	}
+
+	var ids []uint64
+	for id := range reg.IDsIter() {
+		ids = append(ids, id)
+	}
+	if len(ids) != 5 {
+		t.Errorf("expected 5 ids, got %d", len(ids))
+	}
+}
+
+func TestRegistryAllEarlyExit(t *testing.T) {
+	reg, _ := NewRegistry(nil)
+	for i := 0; i < 10; i++ {
+		reg.Add(uint64(i), generateRandomVector(1536))
+	}
+
+	count := 0
+	for range reg.All() {
+		count++
+		if count == 3 {
+			break
+		}
+	}
+	if count != 3 {
+		t.Errorf("expected early exit at 3, got %d", count)
+	}
+}
+
+// --- Iter Benchmarks ---
+
+func BenchmarkRegistryAll(b *testing.B) {
+	cfg := &Config{
+		FullDim:         benchDim,
+		HybridBitWidth:  8,
+		HybridBlockSize: 32,
+		NumWorkers:      4,
+		VectorCapacity:  10000,
+	}
+	reg, _ := NewRegistry(cfg)
+	for i := 0; i < 10000; i++ {
+		reg.Add(uint64(i), generateRandomVector(benchDim))
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		for _, vec := range reg.All() {
+			_ = vec
+		}
+	}
+}
+
+func BenchmarkRegistryIDsIter(b *testing.B) {
+	cfg := &Config{
+		FullDim:         benchDim,
+		HybridBitWidth:  8,
+		HybridBlockSize: 32,
+		NumWorkers:      4,
+		VectorCapacity:  10000,
+	}
+	reg, _ := NewRegistry(cfg)
+	for i := 0; i < 10000; i++ {
+		reg.Add(uint64(i), generateRandomVector(benchDim))
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		for range reg.IDsIter() {
+		}
 	}
 }

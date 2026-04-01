@@ -1,5 +1,7 @@
 package turboquant
 
+import "errors"
+
 // Config holds configuration for TurboQuant vector operations.
 type Config struct {
 	// FullDim is the original dimensionality of input vectors (e.g., 1536 for OpenAI embeddings)
@@ -12,8 +14,6 @@ type Config struct {
 	NumWorkers int
 	// VectorCapacity is the initial capacity for vector storage
 	VectorCapacity int
-	// SegmentSize is the size of each mmap segment in bytes
-	SegmentSize int
 }
 
 // DefaultConfig returns a default configuration suitable for most use cases.
@@ -24,7 +24,6 @@ func DefaultConfig() *Config {
 		HybridBlockSize: 32,
 		NumWorkers:      4,
 		VectorCapacity:  100000,
-		SegmentSize:     64 << 20, // 64MB
 	}
 }
 
@@ -40,10 +39,10 @@ func (c *Config) Validate() error {
 		return ErrInvalidBlockSize
 	}
 	if c.NumWorkers <= 0 {
-		c.NumWorkers = 1
+		return errors.New("invalid num workers: must be positive")
 	}
 	if c.VectorCapacity <= 0 {
-		c.VectorCapacity = 10000
+		return errors.New("invalid vector capacity: must be positive")
 	}
 	return nil
 }
