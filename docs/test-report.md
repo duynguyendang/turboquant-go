@@ -212,14 +212,23 @@ This is a fundamental limitation of the QJL approach with FWHT: the transform th
 
 ### Allocations per Query (10K vectors)
 
-| Operation | Latency | Memory | Allocations |
-|---|---|---|---|
-| Search | 7.05 ms | 55 KB | 35 |
-| SearchIter | 30.54 ms | 25.7 MB | 14 |
-| All | 6.11 ms | 25.7 MB | 5 |
-| IDsIter | 28.8 μs | 82 KB | 4 |
+| Operation | Latency | Memory | Allocations | Improvement |
+|---|---|---|---|---|
+| Search | 7.6 ms | 56 KB | 36 | — |
+| SearchIter | 24.7 ms | 53 KB | 13 | **99.8% less memory** |
+| All | 33 μs | 1.4 KB | 4 | **99.99% less memory** |
+| IDsIter | 28 μs | 1.4 KB | 4 | **98% less memory** |
 
-SearchIter copies the entire vector slab (25.7 MB for 10K × 2,560B). Consider zero-copy alternatives for large registries.
+**Zero-copy implementation:** All iterators snapshot the vector slab slice header (pointer + len) under RLock, then read directly without copying. Tombstone bitset is copied separately (~1.3 KB for 10K vectors).
+
+### Tombstone Delete Performance
+
+| Operation | Before (swap-delete) | After (tombstone) |
+|---|---|---|
+| Delete latency | O(vectorSize) — copies data | O(1) — sets 1 bit |
+| Add (with reuse) | O(N) — appends | O(1) — reuses tombstoned slot |
+| Memory overhead | 0 B | 1.25 KB per 10K vectors |
+| Search safety | Swap corrupts concurrent readers | Tombstone preserves reader consistency |
 
 ### GC Pressure (100K vectors, 100 concurrent queries)
 
@@ -237,13 +246,13 @@ SearchIter copies the entire vector slab (25.7 MB for 10K × 2,560B). Consider z
 - **8-bit accuracy**: Recall@10 = 100%, MSE = 1e-8 — near-perfect
 - **Parallelism**: 3.1× speedup with 4 workers, near-linear scaling
 - **Compression**: 4-bit uses 25% of FP32 memory (1,536B vs 6,144B)
-- **Zero-allocation dot products**: All compressed modes use 0 B/op
+- **Zero-copy iterators**: All() uses 1.4 KB vs 25.7 MB before (99.99% reduction)
+- **Tombstone deletes**: O(1) deletion, slot reuse, safe concurrent reads
 
 ### What Needs Improvement
 - **4-bit accuracy**: Recall@10 = 80% — significant drop from 8-bit
-- **QJL effectiveness**: Per-block QJL with sign bits provides **no measurable improvement** for random vectors. The residual sign correlation between different vectors is too weak to affect rankings.
+- **QJL effectiveness**: Per-block QJL with sign bits provides **no measurable improvement** for random or clustered vectors. The residual sign correlation between different vectors is too weak to affect rankings.
 - **Dot product speed**: Compressed dot products are 4× slower than FP32, not faster
-- **SearchIter memory**: Copies entire vector slab (25+ MB for 10K vectors)
 
 ### QJL Root Cause Analysis
 The QJL correction formula `Σ(wA_b × wB_b × (blockSize - 2×popcount))` captures only the residual-residual term of the dot product error:

@@ -3,6 +3,56 @@
 
 package turboquant
 
+// dotProdBlock4_SIMD computes sumQQ, sumQA, sumQB for 4-bit blocks.
+// Uses multi-accumulator loop unrolling for CPU pipelining.
+func dotProdBlock4_SIMD(a, b []byte, blockLen int) (sumQQ, sumQA, sumQB int64) {
+	var qq0, qq1 int64
+	var qa0, qa1 int64
+	var qb0, qb1 int64
+
+	i := 0
+	for ; i+2 <= blockLen; i += 2 {
+		byteA := a[i/2]
+		byteB := b[i/2]
+
+		ha := int64(byteA >> 4)
+		hb := int64(byteB >> 4)
+		qq0 += ha * hb
+		qa0 += ha
+		qb0 += hb
+
+		la := int64(byteA & 0x0F)
+		lb := int64(byteB & 0x0F)
+		qq1 += la * lb
+		qa1 += la
+		qb1 += lb
+	}
+
+	sumQQ = qq0 + qq1
+	sumQA = qa0 + qa1
+	sumQB = qb0 + qb1
+
+	for ; i < blockLen; i++ {
+		byteA := a[i/2]
+		byteB := b[i/2]
+		if i%2 == 0 {
+			qa := int64(byteA >> 4)
+			qb := int64(byteB >> 4)
+			sumQQ += qa * qb
+			sumQA += qa
+			sumQB += qb
+		} else {
+			qa := int64(byteA & 0x0F)
+			qb := int64(byteB & 0x0F)
+			sumQQ += qa * qb
+			sumQA += qa
+			sumQB += qb
+		}
+	}
+
+	return
+}
+
 // dotProdBlock8_SIMD computes sumQQ, sumQA, sumQB for 8-bit blocks
 // using loop unrolling and multiple accumulators for better CPU pipelining.
 func dotProdBlock8_SIMD(a, b []byte) (sumQQ, sumQA, sumQB int64) {
@@ -57,55 +107,6 @@ func dotProdBlock8_SIMD(a, b []byte) (sumQQ, sumQA, sumQB int64) {
 		sumQQ += qa * qb
 		sumQA += qa
 		sumQB += qb
-	}
-
-	return
-}
-
-// dotProdBlock4_SIMD computes sumQQ, sumQA, sumQB for 4-bit blocks.
-func dotProdBlock4_SIMD(a, b []byte, blockLen int) (sumQQ, sumQA, sumQB int64) {
-	var qq0, qq1 int64
-	var qa0, qa1 int64
-	var qb0, qb1 int64
-
-	i := 0
-	for ; i+2 <= blockLen; i += 2 {
-		byteA := a[i/2]
-		byteB := b[i/2]
-
-		ha := int64(byteA >> 4)
-		hb := int64(byteB >> 4)
-		qq0 += ha * hb
-		qa0 += ha
-		qb0 += hb
-
-		la := int64(byteA & 0x0F)
-		lb := int64(byteB & 0x0F)
-		qq1 += la * lb
-		qa1 += la
-		qb1 += lb
-	}
-
-	sumQQ = qq0 + qq1
-	sumQA = qa0 + qa1
-	sumQB = qb0 + qb1
-
-	for ; i < blockLen; i++ {
-		byteA := a[i/2]
-		byteB := b[i/2]
-		if i%2 == 0 {
-			qa := int64(byteA >> 4)
-			qb := int64(byteB >> 4)
-			sumQQ += qa * qb
-			sumQA += qa
-			sumQB += qb
-		} else {
-			qa := int64(byteA & 0x0F)
-			qb := int64(byteB & 0x0F)
-			sumQQ += qa * qb
-			sumQA += qa
-			sumQB += qb
-		}
 	}
 
 	return

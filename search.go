@@ -37,6 +37,7 @@ func (r *Registry) Search(query []float32, k int) ([]SearchResult, error) {
 }
 
 // SearchWithLimit finds the top-k most similar vectors to the query.
+// Zero-copy: workers read directly from the vector slab snapshot.
 func (r *Registry) SearchWithLimit(query []float32, k int) ([]SearchResult, error) {
 	if k <= 0 {
 		return nil, nil
@@ -60,6 +61,11 @@ func (r *Registry) SearchWithLimit(query []float32, k int) ([]SearchResult, erro
 		numWorkers = numVectors
 	}
 
+	// Snapshot tombstones (small: ~62 KB for 500K vectors)
+	tombstones := make([]uint64, len(r.tombstones))
+	copy(tombstones, r.tombstones)
+	r.mu.RUnlock()
+
 	vectorsPerWorker := (numVectors + numWorkers - 1) / numWorkers
 
 	type result struct {
@@ -78,7 +84,7 @@ func (r *Registry) SearchWithLimit(query []float32, k int) ([]SearchResult, erro
 		}
 
 		go func(start, end int) {
-			topK := scanChunkHybrid(vectors, hybridQuery, start, end, k, vectorSize, revMap, dim, cfg)
+			topK := scanChunkHybrid(vectors, hybridQuery, start, end, k, vectorSize, revMap, tombstones, dim, cfg)
 			resultCh <- result{results: topK}
 		}(startIdx, endIdx)
 	}
@@ -89,12 +95,11 @@ func (r *Registry) SearchWithLimit(query []float32, k int) ([]SearchResult, erro
 		allResults = append(allResults, res.results...)
 	}
 
-	r.mu.RUnlock()
 	return getTopK(allResults, k), nil
 }
 
 // scanChunkHybrid scans a chunk of vectors and returns the top-k results.
-func scanChunkHybrid(vectors []byte, query []byte, startIdx, endIdx, k int, vectorSize int, revMap []uint64, dim int, cfg *HybridConfig) []SearchResult {
+func scanChunkHybrid(vectors []byte, query []byte, startIdx, endIdx, k int, vectorSize int, revMap []uint64, tombstones []uint64, dim int, cfg *HybridConfig) []SearchResult {
 	h := make(scoreHeap, 0, k)
 	numVectors := endIdx - startIdx
 	scores := make([]float32, numVectors)
@@ -102,15 +107,19 @@ func scanChunkHybrid(vectors []byte, query []byte, startIdx, endIdx, k int, vect
 	dotProductHybridBatch(query, vectors[startIdx*vectorSize:endIdx*vectorSize], numVectors, vectorSize, dim, cfg, scores)
 
 	for idx := 0; idx < numVectors; idx++ {
+		globalIdx := startIdx + idx
+		if globalIdx/64 < len(tombstones) && tombstones[globalIdx/64]&(1<<uint(globalIdx%64)) != 0 {
+			continue
+		}
 		score := scores[idx]
 
 		if len(h) < k {
-			h = append(h, scoreIndex{score: score, idx: startIdx + idx})
+			h = append(h, scoreIndex{score: score, idx: globalIdx})
 			if len(h) == k {
 				heap.Init(&h)
 			}
 		} else if score > h[0].score {
-			h[0] = scoreIndex{score: score, idx: startIdx + idx}
+			h[0] = scoreIndex{score: score, idx: globalIdx}
 			heap.Fix(&h, 0)
 		}
 	}
@@ -162,6 +171,7 @@ func getTopK(results []SearchResult, k int) []SearchResult {
 }
 
 // SearchIter returns an iter.Seq that yields SearchResult pairs ordered by score descending.
+// Zero-copy: reads directly from the vector slab snapshot.
 func (r *Registry) SearchIter(query []float32, k int) iter.Seq[SearchResult] {
 	if k <= 0 {
 		return func(yield func(SearchResult) bool) {}
@@ -176,12 +186,12 @@ func (r *Registry) SearchIter(query []float32, k int) iter.Seq[SearchResult] {
 
 	hybridQuery := QuantizeHybrid(query, r.hybridCfg)
 	vectorSize := r.vectorSize
-	revMap := make([]uint64, len(r.revMap))
-	copy(revMap, r.revMap)
-	vectors := make([]byte, len(r.vectors))
-	copy(vectors, r.vectors)
+	revMap := r.revMap
+	vectors := r.vectors
 	dim := r.config.FullDim
 	cfg := r.hybridCfg
+	tombstones := make([]uint64, len(r.tombstones))
+	copy(tombstones, r.tombstones)
 	r.mu.RUnlock()
 
 	return func(yield func(SearchResult) bool) {
@@ -191,6 +201,9 @@ func (r *Registry) SearchIter(query []float32, k int) iter.Seq[SearchResult] {
 		dotProductHybridBatch(hybridQuery, vectors, numVectors, vectorSize, dim, cfg, scores)
 
 		for idx := 0; idx < numVectors; idx++ {
+			if idx/64 < len(tombstones) && tombstones[idx/64]&(1<<uint(idx%64)) != 0 {
+				continue
+			}
 			score := scores[idx]
 
 			if len(h) < k {

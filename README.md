@@ -8,9 +8,11 @@
 
 - **Lossy compression**: 1536-dim float32 vectors compress to 2,560 bytes (8-bit) or 1,536 bytes (4-bit) vs 6,144 bytes raw
 - **Compressed dot product**: Compute cosine similarity directly on compressed vectors without full decompression
-- **Parallel search**: Multi-worker top-K search with configurable parallelism (near-linear scaling up to 8 workers)
+- **Parallel search**: Multi-worker top-K search with configurable parallelism (4.5× speedup with 8 workers)
+- **Zero-copy iterators**: `All()`, `AllDecompressed()`, `SearchIter()` read directly from vector slab — 99.9% less memory vs copying
+- **Tombstone deletes**: O(1) deletion via bitset — no vector data copying, slot reuse on re-add
 - **AVX2 SIMD**: Shuffle-based 4-bit dequantization using `_mm256_shuffle_epi8` for fast nibble decoding
-- **Go 1.23 iterators**: `All()`, `AllDecompressed()`, `IDsIter()`, `SearchIter()` for zero-allocation iteration
+- **Go 1.23 iterators**: Streaming search with early exit support
 - **Zero dependencies**: No external dependencies (pure Go)
 
 ## Installation
@@ -82,13 +84,13 @@ score := turboquant.DotProductHybrid(vecA_compressed, vecB_compressed, 1536, nil
 ```go
 reg, _ := turboquant.NewRegistry(nil)
 
-reg.Add(id uint64, vec []float32) error          // Add a vector
+reg.Add(id uint64, vec []float32) error          // Add a vector (reuses deleted slots)
 data, ok := reg.Get(id uint64) ([]byte, bool)    // Get compressed vector
 vec, ok := reg.GetDecompressed(id uint64) ([]float32, bool)  // Get decompressed
-reg.Delete(id uint64) bool                        // Delete a vector
-n := reg.Count()                                  // Count vectors
+reg.Delete(id uint64) bool                        // O(1) tombstone delete
+n := reg.Count()                                  // Count active vectors
 exists := reg.Has(id uint64) bool                 // Check existence
-ids := reg.IDs()                                  // Get all IDs
+ids := reg.IDs()                                  // Get all active IDs
 ```
 
 ### Search
@@ -100,17 +102,19 @@ results, _ := reg.Search(queryVector, 10)
 
 ### Iterators (Go 1.23+)
 
+All iterators are zero-copy — they read directly from the vector slab without copying data.
+
 ```go
-// Iterate over all vectors (compressed)
+// Iterate over all vectors (compressed) — zero-copy
 for id, vec := range reg.All() { ... }
 
-// Iterate over all vectors (decompressed)
+// Iterate over all vectors (decompressed) — zero-copy slab, allocates per-vector
 for id, vec := range reg.AllDecompressed() { ... }
 
-// Iterate over IDs only
+// Iterate over IDs only — zero-copy
 for id := range reg.IDsIter() { ... }
 
-// Stream search results (supports early exit)
+// Stream search results (supports early exit) — zero-copy
 for result := range reg.SearchIter(query, 10) {
     if result.Score < 0.5 { break }
 }
@@ -218,6 +222,17 @@ Disable SIMD: `go build -tags noasm`
 | 1024 | 3.4 μs |
 | 2048 | 7.4 μs |
 | 4096 | 15.7 μs |
+
+### Memory Efficiency (10K vectors)
+
+| Operation | Memory | Allocations |
+|---|---|---|
+| Search (parallel) | 56 KB | 36 |
+| SearchIter (zero-copy) | 53 KB | 13 |
+| All() (zero-copy) | 1.4 KB | 4 |
+| IDsIter() (zero-copy) | 1.4 KB | 4 |
+
+Tombstone overhead: 1.25 KB per 10K vectors. Delete is O(1) bit set.
 
 ## Compression Ratio
 
