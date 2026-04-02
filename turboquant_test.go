@@ -744,3 +744,266 @@ func BenchmarkRegistryIDsIter(b *testing.B) {
 		}
 	}
 }
+
+// --- QJL Tests ---
+
+func TestQuantizationAccuracy4BitQJL(t *testing.T) {
+	cfg := &HybridConfig{BitWidth: 4, BlockSize: 32, UseLUT: true, EnableQJL: true}
+
+	for seed := 0; seed < 100; seed++ {
+		rng := rand.New(rand.NewSource(int64(seed)))
+		vec := make([]float32, benchDim)
+		var sumSquares float32
+		for i := range vec {
+			vec[i] = float32(rng.NormFloat64() * 0.1)
+			sumSquares += vec[i] * vec[i]
+		}
+		mag := float32(math.Sqrt(float64(sumSquares)))
+		if mag > 1e-10 {
+			for i := range vec {
+				vec[i] /= mag
+			}
+		}
+
+		compressed := QuantizeHybrid(vec, cfg)
+		decompressed := DequantizeHybrid(compressed, benchDim, cfg)
+
+		dot := DotProduct(vec, decompressed)
+
+		if dot < 0.99 {
+			t.Errorf("4-bit QJL accuracy too low: %.6f (seed=%d)", dot, seed)
+		}
+	}
+}
+
+func TestQJLImprovesAccuracy(t *testing.T) {
+	cfgPlain := &HybridConfig{BitWidth: 4, BlockSize: 32, UseLUT: true, EnableQJL: false}
+	cfgQJL := &HybridConfig{BitWidth: 4, BlockSize: 32, UseLUT: true, EnableQJL: true}
+
+	var plainSum, qjlSum float32
+	for seed := 0; seed < 50; seed++ {
+		rng := rand.New(rand.NewSource(int64(seed)))
+		vec := make([]float32, benchDim)
+		var sumSquares float32
+		for i := range vec {
+			vec[i] = float32(rng.NormFloat64() * 0.1)
+			sumSquares += vec[i] * vec[i]
+		}
+		mag := float32(math.Sqrt(float64(sumSquares)))
+		if mag > 1e-10 {
+			for i := range vec {
+				vec[i] /= mag
+			}
+		}
+
+		compPlain := QuantizeHybrid(vec, cfgPlain)
+		compQJL := QuantizeHybrid(vec, cfgQJL)
+
+		decPlain := DequantizeHybrid(compPlain, benchDim, cfgPlain)
+		decQJL := DequantizeHybrid(compQJL, benchDim, cfgQJL)
+
+		plainSum += DotProduct(vec, decPlain)
+		qjlSum += DotProduct(vec, decQJL)
+	}
+
+	plainAvg := plainSum / 50
+	qjlAvg := qjlSum / 50
+
+	t.Logf("4-bit plain avg: %.6f, 4-bit+QJL avg: %.6f", plainAvg, qjlAvg)
+
+	if qjlAvg < plainAvg {
+		t.Errorf("QJL should improve or match accuracy: plain=%.6f, qjl=%.6f", plainAvg, qjlAvg)
+	}
+}
+
+func TestCompressedDotProductAccuracyQJL(t *testing.T) {
+	cfg := &HybridConfig{BitWidth: 4, BlockSize: 32, UseLUT: true, EnableQJL: true}
+
+	for seed := 0; seed < 50; seed++ {
+		rng := rand.New(rand.NewSource(int64(seed)))
+		vecA := make([]float32, benchDim)
+		vecB := make([]float32, benchDim)
+		for i := range vecA {
+			vecA[i] = float32(rng.NormFloat64() * 0.1)
+			vecB[i] = float32(rng.NormFloat64() * 0.1)
+		}
+		vecA = L2Normalize(vecA)
+		vecB = L2Normalize(vecB)
+
+		compA := QuantizeHybrid(vecA, cfg)
+		compB := QuantizeHybrid(vecB, cfg)
+
+		fullDot := DotProduct(vecA, vecB)
+		compressedDot := DotProductHybrid(compA, compB, benchDim, cfg)
+
+		diff := math.Abs(float64(fullDot - compressedDot))
+		if diff > 0.01 {
+			t.Errorf("Compressed QJL dot product mismatch: full=%.6f, compressed=%.6f, diff=%.6f",
+				fullDot, compressedDot, diff)
+		}
+	}
+}
+
+func TestQJLVectorSize(t *testing.T) {
+	cfgPlain := &HybridConfig{BitWidth: 4, BlockSize: 32, EnableQJL: false}
+	cfgQJL := &HybridConfig{BitWidth: 4, BlockSize: 32, EnableQJL: true}
+
+	paddedDim := 2048 // 1536 rounds up
+	plainSize := HybridVectorSize(paddedDim, cfgPlain)
+	qjlSize := HybridVectorSize(paddedDim, cfgQJL)
+
+	expectedQJLOverhead := 64*2 + qjlBitSize64(paddedDim) // weight + bits
+	if qjlSize != plainSize+expectedQJLOverhead {
+		t.Errorf("QJL vector size mismatch: plain=%d, qjl=%d, expected overhead=%d",
+			plainSize, qjlSize, expectedQJLOverhead)
+	}
+}
+
+func TestQJLSearchAccuracy(t *testing.T) {
+	cfgQJL := &Config{
+		FullDim:         benchDim,
+		HybridBitWidth:  4,
+		HybridBlockSize: 32,
+		NumWorkers:      4,
+		VectorCapacity:  100,
+		EnableQJL:       true,
+	}
+	regQJL, err := NewRegistry(cfgQJL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfgPlain := &Config{
+		FullDim:         benchDim,
+		HybridBitWidth:  4,
+		HybridBlockSize: 32,
+		NumWorkers:      4,
+		VectorCapacity:  100,
+		EnableQJL:       false,
+	}
+	regPlain, err := NewRegistry(cfgPlain)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rng := rand.New(rand.NewSource(42))
+	for i := 0; i < 100; i++ {
+		vec := make([]float32, benchDim)
+		var sumSquares float32
+		for j := range vec {
+			vec[j] = float32(rng.NormFloat64() * 0.1)
+			sumSquares += vec[j] * vec[j]
+		}
+		mag := float32(math.Sqrt(float64(sumSquares)))
+		if mag > 1e-10 {
+			for j := range vec {
+				vec[j] /= mag
+			}
+		}
+		regQJL.Add(uint64(i), vec)
+		regPlain.Add(uint64(i), vec)
+	}
+
+	query := generateRandomVector(benchDim)
+	resultsQJL, _ := regQJL.Search(query, 10)
+	resultsPlain, _ := regPlain.Search(query, 10)
+
+	if len(resultsQJL) != 10 || len(resultsPlain) != 10 {
+		t.Fatalf("Expected 10 results: QJL=%d, Plain=%d", len(resultsQJL), len(resultsPlain))
+	}
+
+	t.Logf("QJL top-3: %+v", resultsQJL[:3])
+	t.Logf("Plain top-3: %+v", resultsPlain[:3])
+}
+
+// --- QJL Benchmarks ---
+
+func BenchmarkQuantize4BitQJL(b *testing.B) {
+	cfg := &HybridConfig{BitWidth: 4, BlockSize: 32, UseLUT: true, EnableQJL: true}
+	vec := generateRandomVector(benchDim)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		QuantizeHybrid(vec, cfg)
+	}
+}
+
+func BenchmarkDequantize4BitQJL(b *testing.B) {
+	cfg := &HybridConfig{BitWidth: 4, BlockSize: 32, UseLUT: true, EnableQJL: true}
+	vec := generateRandomVector(benchDim)
+	compressed := QuantizeHybrid(vec, cfg)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		DequantizeHybrid(compressed, benchDim, cfg)
+	}
+}
+
+func BenchmarkDotProductHybrid4BitQJL(b *testing.B) {
+	cfg := &HybridConfig{BitWidth: 4, BlockSize: 32, UseLUT: true, EnableQJL: true}
+	vecA := generateRandomVector(benchDim)
+	vecB := generateRandomVector(benchDim)
+	compA := QuantizeHybrid(vecA, cfg)
+	compB := QuantizeHybrid(vecB, cfg)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		DotProductHybrid(compA, compB, benchDim, cfg)
+	}
+}
+
+func BenchmarkSearch4BitQJL(b *testing.B) {
+	cfg := &Config{
+		FullDim:         benchDim,
+		HybridBitWidth:  4,
+		HybridBlockSize: 32,
+		NumWorkers:      4,
+		VectorCapacity:  benchVectorCount,
+		EnableQJL:       true,
+	}
+	reg, _ := NewRegistry(cfg)
+	vecs := make([][]float32, benchVectorCount)
+	for i := 0; i < benchVectorCount; i++ {
+		vecs[i] = generateRandomVector(benchDim)
+		reg.Add(uint64(i), vecs[i])
+	}
+	query := generateRandomVector(benchDim)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		reg.Search(query, benchTopK)
+	}
+}
+
+func BenchmarkSearch4BitQJL1K(b *testing.B) {
+	cfg := &Config{
+		FullDim:         benchDim,
+		HybridBitWidth:  4,
+		HybridBlockSize: 32,
+		NumWorkers:      4,
+		VectorCapacity:  1000,
+		EnableQJL:       true,
+	}
+	reg, _ := NewRegistry(cfg)
+	vecs := make([][]float32, 1000)
+	for i := 0; i < 1000; i++ {
+		vecs[i] = generateRandomVector(benchDim)
+		reg.Add(uint64(i), vecs[i])
+	}
+	query := generateRandomVector(benchDim)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		reg.Search(query, benchTopK)
+	}
+}

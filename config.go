@@ -4,16 +4,12 @@ import "errors"
 
 // Config holds configuration for TurboQuant vector operations.
 type Config struct {
-	// FullDim is the original dimensionality of input vectors (e.g., 1536 for OpenAI embeddings)
-	FullDim int
-	// HybridBitWidth is the quantization bit width (4 or 8)
-	HybridBitWidth int
-	// HybridBlockSize is the block size for block-wise quantization (must be divisible by 8)
+	FullDim         int
+	HybridBitWidth  int
 	HybridBlockSize int
-	// NumWorkers is the number of parallel workers for search operations
-	NumWorkers int
-	// VectorCapacity is the initial capacity for vector storage
-	VectorCapacity int
+	NumWorkers      int
+	VectorCapacity  int
+	EnableQJL       bool
 }
 
 // DefaultConfig returns a default configuration suitable for most use cases.
@@ -24,6 +20,7 @@ func DefaultConfig() *Config {
 		HybridBlockSize: 32,
 		NumWorkers:      4,
 		VectorCapacity:  100000,
+		EnableQJL:       false,
 	}
 }
 
@@ -52,6 +49,7 @@ func (c *Config) hybridConfig() *HybridConfig {
 	return &HybridConfig{
 		BitWidth:  c.HybridBitWidth,
 		BlockSize: c.HybridBlockSize,
+		EnableQJL: c.EnableQJL,
 	}
 }
 

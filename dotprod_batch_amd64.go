@@ -15,7 +15,7 @@ func dotProductHybridBatch(query []byte, vectors []byte, numVectors int, vectorS
 	case BitWidth8:
 		dotProductHybridBatch8(query, vectors, numVectors, vectorSize, numBlocks, blockSize, cfg, scores)
 	case BitWidth4:
-		dotProductHybridBatch4(query, vectors, numVectors, vectorSize, numBlocks, blockSize, cfg, scores)
+		dotProductHybridBatch4(query, vectors, numVectors, vectorSize, numBlocks, blockSize, paddedDim, cfg, scores)
 	}
 }
 
@@ -58,8 +58,11 @@ func dotProductHybridBatch8(query []byte, vectors []byte, numVectors int, vector
 	}
 }
 
-func dotProductHybridBatch4(query []byte, vectors []byte, numVectors int, vectorSize int, numBlocks int, blockSize int, cfg *HybridConfig, scores []float32) {
-	paddedDim := numBlocks * blockSize
+func dotProductHybridBatch4(query []byte, vectors []byte, numVectors int, vectorSize int, numBlocks int, blockSize int, paddedDim int, cfg *HybridConfig, scores []float32) {
+	baseSize := numBlocks * (8 + blockSize/2)
+	weightOff := baseSize
+	bitOff := baseSize + numBlocks*2
+	bitCount := qjlBitCount64(paddedDim)
 
 	for i := 0; i < numVectors; i++ {
 		vecStart := i * vectorSize
@@ -91,6 +94,24 @@ func dotProductHybridBatch4(query []byte, vectors []byte, numVectors int, vector
 				scaleA*zeroB*float32(sumQA) +
 				scaleB*zeroA*float32(sumQB) +
 				float32(blockLen)*zeroA*zeroB
+		}
+
+		if cfg.EnableQJL && len(vecData) > bitOff {
+			var correctionSum float32
+			for block := 0; block < numBlocks; block++ {
+				wA := f16tof32(getUint16(query[weightOff+block*2:]))
+				wB := f16tof32(getUint16(vecData[weightOff+block*2:]))
+
+				qjlIdx := block / 2
+				shift := (block % 2) * 32
+				if qjlIdx < bitCount {
+					xor := (getUint64(query[bitOff+qjlIdx*8:]) ^ getUint64(vecData[bitOff+qjlIdx*8:])) >> shift
+					pop := bitsOnesCount32(uint32(xor))
+					corr := int64(blockSize) - 2*int64(pop)
+					correctionSum += wA * wB * float32(corr)
+				}
+			}
+			totalSum += correctionSum
 		}
 
 		scores[i] = totalSum

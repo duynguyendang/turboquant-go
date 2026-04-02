@@ -8,14 +8,12 @@ package turboquant
 func dotProdBlock8_SIMD(a, b []byte) (sumQQ, sumQA, sumQB int64) {
 	n := len(a)
 
-	// Process 8 bytes at a time with 4 accumulators
 	var qq0, qq1, qq2, qq3 int64
 	var qa0, qa1, qa2, qa3 int64
 	var qb0, qb1, qb2, qb3 int64
 
 	i := 0
 	for ; i+8 <= n; i += 8 {
-		// Load 8 bytes
 		a0, a1, a2, a3 := int64(a[i]), int64(a[i+1]), int64(a[i+2]), int64(a[i+3])
 		a4, a5, a6, a7 := int64(a[i+4]), int64(a[i+5]), int64(a[i+6]), int64(a[i+7])
 		b0, b1, b2, b3 := int64(b[i]), int64(b[i+1]), int64(b[i+2]), int64(b[i+3])
@@ -49,12 +47,10 @@ func dotProdBlock8_SIMD(a, b []byte) (sumQQ, sumQA, sumQB int64) {
 		qb3 += b7
 	}
 
-	// Combine accumulators
 	sumQQ = qq0 + qq1 + qq2 + qq3
 	sumQA = qa0 + qa1 + qa2 + qa3
 	sumQB = qb0 + qb1 + qb2 + qb3
 
-	// Handle remainder
 	for ; i < n; i++ {
 		qa := int64(a[i])
 		qb := int64(b[i])
@@ -77,24 +73,23 @@ func dotProdBlock4_SIMD(a, b []byte, blockLen int) (sumQQ, sumQA, sumQB int64) {
 		byteA := a[i/2]
 		byteB := b[i/2]
 
-		qa1 := int64(byteA >> 4)
-		qb1 := int64(byteB >> 4)
-		qq0 += qa1 * qb1
-		qa0 += qa1
-		qb0 += qb1
+		ha := int64(byteA >> 4)
+		hb := int64(byteB >> 4)
+		qq0 += ha * hb
+		qa0 += ha
+		qb0 += hb
 
-		qa2 := int64(byteA & 0x0F)
-		qb2 := int64(byteB & 0x0F)
-		qq1 += qa2 * qb2
-		qa1 += qa2
-		qb1 += qb2
+		la := int64(byteA & 0x0F)
+		lb := int64(byteB & 0x0F)
+		qq1 += la * lb
+		qa1 += la
+		qb1 += lb
 	}
 
 	sumQQ = qq0 + qq1
 	sumQA = qa0 + qa1
 	sumQB = qb0 + qb1
 
-	// Handle remainder
 	for ; i < blockLen; i++ {
 		byteA := a[i/2]
 		byteB := b[i/2]

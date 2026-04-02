@@ -1,6 +1,9 @@
 package turboquant
 
-import "math"
+import (
+	"math"
+	"math/bits"
+)
 
 const (
 	BitWidth4  = 4
@@ -12,8 +15,8 @@ const (
 type HybridConfig struct {
 	BitWidth  int
 	BlockSize int
-	// UseLUT enables look-up table optimizations for quantization/dequantization
-	UseLUT bool
+	UseLUT    bool
+	EnableQJL bool
 }
 
 // DefaultHybridConfig returns a default hybrid configuration.
@@ -22,6 +25,7 @@ func DefaultHybridConfig() *HybridConfig {
 		BitWidth:  BitWidth8,
 		BlockSize: 32,
 		UseLUT:    true,
+		EnableQJL: false,
 	}
 }
 
@@ -30,15 +34,21 @@ func HybridVectorSize(dim int, cfg *HybridConfig) int {
 	if cfg == nil {
 		cfg = DefaultHybridConfig()
 	}
-	numBlocks := (dim + cfg.BlockSize - 1) / cfg.BlockSize
+	paddedDim := nextPow2(dim)
+	numBlocks := (paddedDim + cfg.BlockSize - 1) / cfg.BlockSize
+	baseSize := 0
 	switch cfg.BitWidth {
 	case BitWidth8:
-		return numBlocks * (8 + cfg.BlockSize)
+		baseSize = numBlocks * (8 + cfg.BlockSize)
 	case BitWidth4:
-		return numBlocks * (8 + cfg.BlockSize/2)
+		baseSize = numBlocks * (8 + cfg.BlockSize/2)
 	default:
-		return numBlocks * (8 + cfg.BlockSize)
+		baseSize = numBlocks * (8 + cfg.BlockSize)
 	}
+	if cfg.EnableQJL && cfg.BitWidth == BitWidth4 {
+		baseSize += numBlocks*2 + qjlBitSize64(paddedDim)
+	}
+	return baseSize
 }
 
 // QuantizeHybrid compresses a float32 vector using FWHT + block-wise quantization.
@@ -152,16 +162,34 @@ func QuantizeHybrid(vec []float32, cfg *HybridConfig) []byte {
 		}
 	}
 
+	if cfg.EnableQJL && cfg.BitWidth == BitWidth4 {
+		dequantized := DequantizeHybridNoFWHT(out[:offset], paddedDim, cfg)
+
+		weights := computeQJLWeightPerBlock(padded, dequantized, numBlocks, blockSize)
+		for b := 0; b < numBlocks; b++ {
+			putUint16(out[offset+b*2:], weights[b])
+		}
+		offset += numBlocks * 2
+
+		residual := make([]float32, paddedDim)
+		for i := 0; i < dim; i++ {
+			residual[i] = padded[i] - dequantized[i]
+		}
+
+		bitCount := qjlBitCount64(paddedDim)
+		bits := make([]uint64, bitCount)
+		packQJLBits64(residual, bits)
+		for i := 0; i < bitCount; i++ {
+			putUint64(out[offset+i*8:], bits[i])
+		}
+	}
+
 	return out
 }
 
-// DequantizeHybrid decompresses a hybrid-compressed vector back to float32.
-func DequantizeHybrid(data []byte, dim int, cfg *HybridConfig) []float32 {
-	if cfg == nil {
-		cfg = DefaultHybridConfig()
-	}
-
-	paddedDim := nextPow2(dim)
+// DequantizeHybridNoFWHT decompresses without the inverse FWHT step.
+// Used internally for QJL residual computation.
+func DequantizeHybridNoFWHT(data []byte, paddedDim int, cfg *HybridConfig) []float32 {
 	vec := make([]float32, paddedDim)
 	blockSize := cfg.BlockSize
 	numBlocks := (paddedDim + blockSize - 1) / blockSize
@@ -181,31 +209,53 @@ func DequantizeHybrid(data []byte, dim int, cfg *HybridConfig) []float32 {
 
 		switch cfg.BitWidth {
 		case BitWidth8:
-			if cfg.UseLUT {
-				offset += dequantizeBlock8_AVX2(data[offset:offset+blockSize], vec, scale, zero, start, end)
-			} else {
-				for i := start; i < end; i++ {
-					vec[i] = float32(data[offset])*scale + zero
-					offset++
-				}
+			for i := start; i < end; i++ {
+				vec[i] = float32(data[offset])*scale + zero
+				offset++
 			}
 			offset += blockSize - (end - start)
 		case BitWidth4:
-			if cfg.UseLUT {
-				offset += dequantizeBlock4_AVX2(data[offset:offset+blockSize/2], vec, scale, zero, start, end)
-			} else {
-				for i := start; i < end; i += 2 {
-					packed := data[offset]
-					vec[i] = float32(packed>>4)*scale + zero
-					if i+1 < end {
-						vec[i+1] = float32(packed&0x0F)*scale + zero
-					}
-					offset++
+			for i := start; i < end; i += 2 {
+				packed := data[offset]
+				vec[i] = float32(packed>>4)*scale + zero
+				if i+1 < end {
+					vec[i+1] = float32(packed&0x0F)*scale + zero
 				}
+				offset++
 			}
 			offset += blockSize/2 - (end-start+1)/2
 		}
 	}
+	return vec
+}
+
+// DequantizeHybrid decompresses a hybrid-compressed vector back to float32.
+func DequantizeHybrid(data []byte, dim int, cfg *HybridConfig) []float32 {
+	if cfg == nil {
+		cfg = DefaultHybridConfig()
+	}
+
+	paddedDim := nextPow2(dim)
+	blockSize := cfg.BlockSize
+	numBlocks := (paddedDim + blockSize - 1) / blockSize
+
+	qjlOffset := 0
+	switch cfg.BitWidth {
+	case BitWidth8:
+		qjlOffset = numBlocks * (8 + cfg.BlockSize)
+	case BitWidth4:
+		qjlOffset = numBlocks * (8 + cfg.BlockSize/2)
+		if cfg.EnableQJL {
+			qjlOffset += numBlocks*2 + qjlBitSize64(paddedDim)
+		}
+	}
+
+	vecData := data
+	if cfg.EnableQJL && cfg.BitWidth == BitWidth4 && len(data) > qjlOffset {
+		vecData = data[:numBlocks*(8+blockSize/2)]
+	}
+
+	vec := DequantizeHybridNoFWHT(vecData, paddedDim, cfg)
 
 	FWHT_Optimized(vec)
 	invNorm := 1.0 / float32(math.Sqrt(float64(paddedDim)))
@@ -273,7 +323,33 @@ func DotProductHybrid(a, b []byte, dim int, cfg *HybridConfig) float32 {
 			float32(blockLen)*zeroA*zeroB
 	}
 
+	if cfg.EnableQJL && bitWidth == BitWidth4 {
+		baseSize := numBlocks * (8 + blockSize/2)
+		weightOff := baseSize
+
+		var correctionSum float32
+		for block := 0; block < numBlocks; block++ {
+			wA := f16tof32(getUint16(a[weightOff+block*2:]))
+			wB := f16tof32(getUint16(b[weightOff+block*2:]))
+
+			qjlIdx := block / 2
+			shift := (block % 2) * 32
+			bitCount := qjlBitCount64(paddedDim)
+			if qjlIdx < bitCount {
+				xor := (getUint64(a[baseSize+numBlocks*2+qjlIdx*8:]) ^ getUint64(b[baseSize+numBlocks*2+qjlIdx*8:])) >> shift
+				pop := bitsOnesCount32(uint32(xor))
+				corr := int64(blockSize) - 2*int64(pop)
+				correctionSum += wA * wB * float32(corr)
+			}
+		}
+		totalSum += correctionSum
+	}
+
 	return totalSum
+}
+
+func bitsOnesCount32(v uint32) int {
+	return bits.OnesCount32(v)
 }
 
 // DotProductHybridFull dequantizes both vectors and computes full dot product.
