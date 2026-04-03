@@ -3,8 +3,10 @@
 
 package turboquant
 
-// dotProdBlock4_SIMD computes sumQQ, sumQA, sumQB for 4-bit blocks.
-// Uses multi-accumulator loop unrolling for CPU pipelining.
+func dotProdBlock8_AVX2(a, b []byte) (sumQQ, sumQA, sumQB int64) {
+	return dotProdBlock8_scalar_impl(a, b)
+}
+
 func dotProdBlock4_SIMD(a, b []byte, blockLen int) (sumQQ, sumQA, sumQB int64) {
 	var qq0, qq1 int64
 	var qa0, qa1 int64
@@ -53,9 +55,11 @@ func dotProdBlock4_SIMD(a, b []byte, blockLen int) (sumQQ, sumQA, sumQB int64) {
 	return
 }
 
-// dotProdBlock8_SIMD computes sumQQ, sumQA, sumQB for 8-bit blocks
-// using loop unrolling and multiple accumulators for better CPU pipelining.
 func dotProdBlock8_SIMD(a, b []byte) (sumQQ, sumQA, sumQB int64) {
+	return dotProdBlock8_AVX2(a, b)
+}
+
+func dotProdBlock8_scalar_impl(a, b []byte) (sumQQ, sumQA, sumQB int64) {
 	n := len(a)
 
 	var qq0, qq1, qq2, qq3 int64
