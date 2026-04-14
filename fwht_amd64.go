@@ -5,6 +5,8 @@ package turboquant
 
 // FWHT_SIMD performs the in-place Fast Walsh-Hadamard Transform
 // using optimized butterfly operations with multiple accumulators.
+//
+//go:noinline
 func FWHT_SIMD(vec []float32) {
 	n := len(vec)
 

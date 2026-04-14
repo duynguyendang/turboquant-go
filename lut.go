@@ -62,15 +62,15 @@ func quantizeBlock8_LUT(vec []float32, out []byte, scale, zero float32, start, e
 		v2 := (vec[i+2] - zero) * invScale
 		v3 := (vec[i+3] - zero) * invScale
 
-		out[j+0] = fastRoundUint8(v0)
-		out[j+1] = fastRoundUint8(v1)
-		out[j+2] = fastRoundUint8(v2)
-		out[j+3] = fastRoundUint8(v3)
+		out[j+0] = byte(fastRoundUint8(v0) - 128)
+		out[j+1] = byte(fastRoundUint8(v1) - 128)
+		out[j+2] = byte(fastRoundUint8(v2) - 128)
+		out[j+3] = byte(fastRoundUint8(v3) - 128)
 		j += 4
 	}
 	for ; i < end; i++ {
 		v := (vec[i] - zero) * invScale
-		out[j] = fastRoundUint8(v)
+		out[j] = byte(fastRoundUint8(v) - 128)
 		j++
 	}
 	return j

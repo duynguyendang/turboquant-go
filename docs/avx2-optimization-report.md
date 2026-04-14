@@ -6,18 +6,20 @@
 
 ## Executive Summary
 
-Attempted to implement AVX2 SIMD optimization via **cgo** for 8-bit compressed dot product. Created `avx2/` package with C implementation. All cgo AVX2 implementations were reverted due to a **fundamental hardware limitation**: `VPMADDUBSW` requires signed bytes for the second operand, but Go's `uint8` values 128-255 get sign-extended when cast to C's `int8_t`, causing incorrect multiplication results.
+Attempted to implement AVX2 SIMD optimization via **cgo** for 8-bit compressed dot product. Created `avx2/` package with C implementation. All cgo AVX2 implementations were reverted due to a **fundamental hardware limitation**: `VPMADDUBSW` requires signed bytes for the second operand, but Go's `uint8` values 128-255 are reinterpreted as negative values when viewed as `int8_t`, causing incorrect multiplication results.
 
-Current scalar 8-bit dot product runs at ~2569 ns/op, significantly slower than FP32 at ~364 ns/op (7x slower).
+Current scalar 8-bit dot product runs at ~2,569 ns/op, significantly slower than FP32 at ~364–730 ns/op (3.5–7x slower depending on vector dimension).
 
 ## Current Performance Baseline
 
 | Implementation | Time (ns/op) | Notes |
 |---------------|--------------|-------|
-| FP32 DotProduct | 364 | Baseline |
+| FP32 DotProduct | 364–730 | Baseline (varies by vector dimension; see note below) |
 | 8-bit Scalar | 2,569 | Current - 8-way unrolled |
 | 4-bit Scalar | 3,249 | |
 | 4-bit+QJL | 3,649 | |
+
+**Note on FP32 baseline:** The report's 364 ns figure uses a single-dimension benchmark, while the README shows 730 ns for 1536-dim vectors. The discrepancy reflects measurement methodology differences.
 
 **Target:** 8-bit should match or beat FP32 (~350 ns/op)
 
@@ -51,16 +53,15 @@ __m256i prod16 = _mm256_maddubs_epi16(va, vb);  // PROBLEM HERE
 
 When Go's `uint8` (values 0-255) is passed to C as `int8_t`:
 ```
-uint8_t: 200 (0xC8) → int8_t: -56  (sign-extended!)
+uint8_t: 200 (0xC8) → int8_t: -56  (same bits, reinterpreted as signed)
 ```
 
 This causes **incorrect multiplication** because the hardware interprets byte value 200 as -56 in the multiplication.
 
 ### Attempted Workarounds
 
-1. **Using VPMULLB + manual sum**: Slower than pure scalar due to extra instructions
-2. **Batch processing**: Amortized cgo overhead but didn't solve the sign issue
-3. **Separate scale/zero extraction**: Fixed data layout bugs but still had sign problem
+1. **Batch processing**: Amortized cgo overhead but didn't solve the sign issue
+2. **Separate scale/zero extraction**: Fixed data layout bugs but still had sign problem
 
 ### Cgo Pointer Issue
 
@@ -70,10 +71,7 @@ Batch processing with cgo failed due to Go's pointer policy:
 panic: runtime error: cgo argument has Go pointer to unpinned Go pointer
 ```
 
-This requires either:
-- Passing only raw C pointers (not Go slices)
-- Using `runtime.KeepAlive` and explicit pinning
-- Switching to `go:asm` which avoids cgo entirely
+**Root cause:** Go's runtime does not allow passing Go-managed pointers to C code without explicit copying. The fix is to use `C.CBytes` to copy slice data into C-managed memory, or allocate with `C.malloc`. `runtime.KeepAlive` and pinning are insufficient for slice data passed across the cgo boundary.
 
 ## Search Performance
 
@@ -101,12 +99,9 @@ Then AVX2 `VPMADDUBSW` will work correctly because both operands can be handled 
 
 ### Priority 2: Use go:asm with Hand-Written Assembly
 
-Bypass cgo entirely by writing assembly in `.s` files with `//go:build` constraints. This was attempted previously but failed due to:
-- Go assembler bugs with VINSERTI128
-- DATA section byte ordering issues
-- Instruction encoding problems
+Bypass cgo entirely by writing assembly in `.s` files with `//go:build` constraints. **Note:** The codebase already has working AVX2 assembly — `dequant_amd64.s` successfully uses `VPMOVZXBD`, `VCVTDQ2PS`, `VBROADCASTSS`, and other AVX2 instructions for 4-bit dequantization. The tooling works; the challenge is algorithmic (no single AVX2 instruction performs uint8×uint8 multiply with horizontal reduction).
 
-If Go 1.24+ fixes these issues, this becomes viable.
+An 8-bit dot product assembly implementation using the unpack-to-int16 approach (see Technical Notes below) is feasible. The question is whether the instruction count overhead justifies the parallelism gain vs scalar.
 
 ### Priority 3: Accept Current Performance
 
@@ -133,32 +128,40 @@ When Go byte value 200 is interpreted as signed:
 - Expected: 200 × other_value
 - Actual: -56 × other_value (WRONG!)
 
+**Note:** The bits `0xC8` are unchanged — the value is reinterpreted, not sign-extended. Sign extension occurs only when widening to a larger type (e.g., `int8` → `int16`). Here the byte is loaded directly into a 16-bit lane with signed interpretation.
+
 ### Correct AVX2 Path for uint8 × uint8
 
-Must unpack to int16 first, then use `VPMADDWD`:
+Must unpack to uint16 first, then multiply and horizontally reduce. A concrete instruction sequence:
 
-```c
-// Correct approach (but slower):
-__m256i va = _mm256_loadu_si256(...);
-__m256i vb = _mm256_loadu_si256(...);
+```
+// Load 32 bytes from each vector (2x YMM registers)
+VMOVDQU  (a), Y0       // bytes 0-31 of vector A
+VMOVDQU  (b), Y1       // bytes 0-31 of vector B
 
-__m256i va_lo = _mm256_unpacklo_epi8(va, _mm256_setzero_si256());
-__m256i va_hi = _mm256_unpackhi_epi8(va, _mm256_setzero_si256());
-// ... same for vb ...
+// Unpack bytes to uint16 (zero-extend)
+VPUNPCKLBW Y1, Y0, Y2  // lo 16 bytes → 16 uint16 interleaved
+VPUNPCKHBW Y1, Y0, Y3  // hi 16 bytes → 16 uint16 interleaved
 
-__m256i prod = _mm256_mullo_epi16(va_lo, vb_lo);  // uint16 multiplication
-// Then horizontal sum...
+// Multiply 16-bit values
+VPMULLW  Y3, Y2, Y4    // element-wise uint16 multiply
+
+// Horizontal add to reduce 32 products to a single sum
+// Requires VPHADDW repeated, or extract-and-sum in scalar
+VPHADDW  Y4, Y4, Y5    // 32 → 16 words
+VPHADDW  Y5, Y5, Y6    // 16 → 8 words
+// Final scalar sum of remaining 8 words
 ```
 
-This is what the scalar implementation does, just not using SIMD efficiently.
+**Performance estimate:** This processes 32 elements per iteration vs 8 in the 8-way unrolled scalar. However, each iteration requires ~8 AVX instructions vs ~16 scalar ops. The break-even point depends on instruction latency vs throughput on the target microarchitecture. On Zen 3 (Ryzen 5900HS), this could plausibly reach **500–800 ns** vs the current 2,569 ns — a 3–5x improvement, though likely still behind FP32 due to the extra unpack/multiply steps.
 
 ## Conclusion
 
 **Cgo AVX2 is not viable** for this use case due to the signed byte requirement of `VPMADDUBSW`. The fundamental issue is the mismatch between Go's `uint8` (always unsigned) and the AVX2 instruction's signed byte expectation.
 
 **Path forward:**
-1. Change quantization to use signed int8 storage (requires format change)
-2. Or accept current scalar performance (~2569 ns/op, 7x slower than FP32)
-3. Or wait for Go assembler fixes to enable `go:asm` approach
+1. Change quantization to use signed int8 storage (requires format change — quantize to [-128, +127] range with zero at 0)
+2. Write hand-crafted AVX2 assembly in `.s` (like `dequant_amd64.s`) using the unpack-to-int16 approach — estimated 500–800 ns vs current 2,569 ns
+3. Accept current scalar performance — 8-bit saves 60% memory and search is parallelized
 
 The cgo infrastructure is removed; the codebase uses scalar 8-way unrolled implementation which is correct but not fast.

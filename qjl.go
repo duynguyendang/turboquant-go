@@ -10,7 +10,13 @@ func f32tof16(f float32) uint16 {
 	sign := (b >> 16) & 0x8000
 	exp := int32((b>>23)&0xFF) - 127 + 15
 	mantissa := (b >> 13) & 0x3FF
+
+	// Handle NaN and Infinity
+	if exp-15+127 >= 0xFF {
+		return uint16(sign | 0x7C00)
+	}
 	if exp <= 0 {
+		// Flush denormals to zero
 		return uint16(sign)
 	}
 	if exp >= 31 {

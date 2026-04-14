@@ -57,14 +57,22 @@ func (r *Registry) SearchWithLimit(query []float32, k int) ([]SearchResult, erro
 	dim := r.config.FullDim
 	cfg := r.hybridCfg
 	numWorkers := r.config.NumWorkers
-	if numWorkers > numVectors {
-		numWorkers = numVectors
-	}
 
 	// Snapshot tombstones (small: ~62 KB for 500K vectors)
 	tombstones := make([]uint64, len(r.tombstones))
 	copy(tombstones, r.tombstones)
 	r.mu.RUnlock()
+
+	// Single-threaded path for small datasets: goroutine overhead exceeds computation
+	const minVectorsForParallel = 512
+	if numVectors < minVectorsForParallel || numWorkers <= 1 {
+		topK := scanChunkHybrid(vectors, hybridQuery, 0, numVectors, k, vectorSize, revMap, tombstones, dim, cfg)
+		return topK, nil
+	}
+
+	if numWorkers > numVectors {
+		numWorkers = numVectors
+	}
 
 	vectorsPerWorker := (numVectors + numWorkers - 1) / numWorkers
 

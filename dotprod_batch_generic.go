@@ -21,13 +21,14 @@ func dotProductHybridBatch(query []byte, vectors []byte, numVectors int, vectorS
 
 func dotProductHybridBatch8(query []byte, vectors []byte, numVectors int, vectorSize int, numBlocks int, blockSize int, cfg *HybridConfig, scores []float32) {
 	paddedDim := numBlocks * blockSize
+	qOffset := 0
 
 	for i := 0; i < numVectors; i++ {
 		vecStart := i * vectorSize
 		vecData := vectors[vecStart : vecStart+vectorSize]
 
 		var totalSum float32
-		offsetA := 0
+		offsetA := qOffset
 		offsetB := 0
 
 		for block := 0; block < numBlocks; block++ {
@@ -48,10 +49,17 @@ func dotProductHybridBatch8(query []byte, vectors []byte, numVectors int, vector
 			offsetA += blockSize
 			offsetB += blockSize
 
-			totalSum += scaleA*scaleB*float32(sumQQ) +
-				scaleA*zeroB*float32(sumQA) +
-				scaleB*zeroA*float32(sumQB) +
-				float32(blockLen)*zeroA*zeroB
+			// Expand signed sums to unsigned for the dot product formula
+			blkLen := float32(blockLen)
+			f32_128 := float32(128)
+			unsignedSumQQ := float32(sumQQ) + f32_128*float32(sumQA+sumQB) + f32_128*f32_128*blkLen
+			unsignedSumQA := float32(sumQA) + f32_128*blkLen
+			unsignedSumQB := float32(sumQB) + f32_128*blkLen
+
+			totalSum += scaleA*scaleB*unsignedSumQQ +
+				scaleA*zeroB*unsignedSumQA +
+				scaleB*zeroA*unsignedSumQB +
+				blkLen*zeroA*zeroB
 		}
 
 		scores[i] = totalSum

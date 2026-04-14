@@ -121,12 +121,12 @@ func QuantizeHybrid(vec []float32, cfg *HybridConfig) []byte {
 					} else if q > 255 {
 						q = 255
 					}
-					out[offset] = byte(q)
+					out[offset] = byte(q - 128)
 					offset++
 				}
 			}
 			for i := end - start; i < blockSize; i++ {
-				out[offset] = 0
+				out[offset] = 0x80
 				offset++
 			}
 		case BitWidth4:
@@ -210,7 +210,7 @@ func DequantizeHybridNoFWHT(data []byte, paddedDim int, cfg *HybridConfig) []flo
 		switch cfg.BitWidth {
 		case BitWidth8:
 			for i := start; i < end; i++ {
-				vec[i] = float32(data[offset])*scale + zero
+				vec[i] = float32(int(int8(data[offset]))+128)*scale + zero
 				offset++
 			}
 			offset += blockSize - (end - start)
@@ -241,8 +241,6 @@ func DequantizeHybrid(data []byte, dim int, cfg *HybridConfig) []float32 {
 
 	qjlOffset := 0
 	switch cfg.BitWidth {
-	case BitWidth8:
-		qjlOffset = numBlocks * (8 + cfg.BlockSize)
 	case BitWidth4:
 		qjlOffset = numBlocks * (8 + cfg.BlockSize/2)
 		if cfg.EnableQJL {
@@ -311,16 +309,28 @@ func DotProductHybrid(a, b []byte, dim int, cfg *HybridConfig) float32 {
 			sumQQ, sumQA, sumQB = dotProdBlock8(a[offsetA:offsetA+blockLen], b[offsetB:offsetB+blockLen])
 			offsetA += blockSize
 			offsetB += blockSize
+
+			// Expand signed sums to unsigned for the dot product formula
+			blkLen := float32(blockLen)
+			f32_128 := float32(128)
+			unsignedSumQQ := float32(sumQQ) + f32_128*float32(sumQA+sumQB) + f32_128*f32_128*blkLen
+			unsignedSumQA := float32(sumQA) + f32_128*blkLen
+			unsignedSumQB := float32(sumQB) + f32_128*blkLen
+
+			totalSum += scaleA*scaleB*unsignedSumQQ +
+				scaleA*zeroB*unsignedSumQA +
+				scaleB*zeroA*unsignedSumQB +
+				blkLen*zeroA*zeroB
 		} else {
 			sumQQ, sumQA, sumQB = dotProdBlock4(a[offsetA:offsetA+blockLen/2], b[offsetB:offsetB+blockLen/2], blockLen)
 			offsetA += blockSize / 2
 			offsetB += blockSize / 2
-		}
 
-		totalSum += scaleA*scaleB*float32(sumQQ) +
-			scaleA*zeroB*float32(sumQA) +
-			scaleB*zeroA*float32(sumQB) +
-			float32(blockLen)*zeroA*zeroB
+			totalSum += scaleA*scaleB*float32(sumQQ) +
+				scaleA*zeroB*float32(sumQA) +
+				scaleB*zeroA*float32(sumQB) +
+				float32(blockLen)*zeroA*zeroB
+		}
 	}
 
 	if cfg.EnableQJL && bitWidth == BitWidth4 {
